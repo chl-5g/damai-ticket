@@ -1,0 +1,13 @@
+{
+    "cdp_host": "127.0.0.1",
+    "cdp_port": 9222,
+    "target_url": "https://m.damai.cn/shows/detail.html?itemId=YOUR_ITEM_ID",
+    "target_time": "2026-03-20 10:00:00",
+    "session_index": 0,
+    "ticket_tier_index": 0,
+    "ticket_count": 1,
+    "viewer_names": [],
+    "poll_interval_ms": 200,
+    "retry_count": 50,
+    "random_delay_ms": [50, 150]
+}
