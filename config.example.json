@@ -1,0 +1,18 @@
+{
+    "cdp_host": "127.0.0.1",
+    "cdp_port": 9222,
+    "mobile_mode": false,
+    "mobile_user_agent": "",
+    "mobile_viewport_width": 390,
+    "mobile_viewport_height": 844,
+    "mobile_device_scale_factor": 3,
+    "target_url": "https://detail.damai.cn/item.htm?id=YOUR_ITEM_ID",
+    "target_time": "",
+    "session_index": 0,
+    "ticket_tier_index": 0,
+    "ticket_count": 1,
+    "viewer_names": [],
+    "poll_interval_ms": 200,
+    "retry_count": 50,
+    "random_delay_ms": [50, 150]
+}

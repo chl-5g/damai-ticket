@@ -1,22 +1,26 @@
 # 大麦网自动抢票脚本
 
-基于 Chrome DevTools Protocol (CDP) 的大麦网自动抢票工具。通过连接 Mac 上已登录的 Chrome 浏览器，自动完成抢票操作。
+基于 Chrome DevTools Protocol (CDP) 的大麦网浏览器端辅助脚本：连接**已登录**的 Chrome/Chromium，自动完成**导航、预选场次/票档、轮询购买按钮、提交订单**（支付需人工）。  
+
+仓库：<https://github.com/chl-5g/damai-ticket>
 
 ## 原理
 
 ```
-Mac Chrome (已登录大麦网) ◄── CDP WebSocket ──► 工作站 Python 脚本
-       ▲                                              │
-  用户看到操作过程                              自动点击/选座/下单
+Chrome/Chromium (已登录大麦) ◄── CDP WebSocket ──► Python 脚本
+            ▲                                        │
+      用户可见页面                          预选场次/票档、点击购买、提交订单
 ```
 
-核心优势：**复用已登录的浏览器会话**，无需处理登录和验证码。利用 Chrome 的远程调试功能，脚本通过 WebSocket 直接操控浏览器页面。
+**说明**：本项目**不包含**地图选座；若场次为「不支持选座」，行为与页面一致。部分场次仅限 **大麦 App** 购票，浏览器内会出现「该渠道不支持购票」等提示，脚本会检测后以 **exit code 2** 退出，无法用 CDP 替代原生 App。
 
 ## 环境要求
 
-- **Mac 端**: Chrome 浏览器（建议 Chrome 120+）
-- **工作站端**: Python 3.8+、`websockets` 库
-- 两台机器在同一局域网内（或通过 SSH 端口转发连接）
+- Windows / macOS / Linux 均可（脚本端）
+- Chrome 或 Chromium（建议 120+）
+- Python 3.8+，依赖：`websockets`
+
+默认**本机**连本机 Chrome；跨机器时自行用 SSH 把远端 `9222` 转到本机即可。
 
 ## 安装
 
@@ -26,103 +30,116 @@ pip3 install websockets
 
 ## 使用步骤
 
-### 第一步：Mac 启动 Chrome 远程调试
+### 第一步：启动 Chrome 远程调试
 
-关闭所有 Chrome 窗口后执行：
+先**完全退出** Chrome，再启动（否则调试端口不生效）：
 
 ```bash
+# macOS
 open -a "Google Chrome" --args --remote-debugging-port=9222
+
+# Windows（PowerShell 示例）
+# & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+
+# Linux
+# google-chrome --remote-debugging-port=9222
 ```
 
-> 如果 Chrome 已在运行，必须先完全退出再用此命令启动，否则 `--remote-debugging-port` 参数不会生效。
+### 第二步：登录大麦
 
-### 第二步：登录大麦网
+在 Chrome 中打开 <https://www.damai.cn> 或 <https://m.damai.cn> 并登录。
 
-在 Chrome 中打开大麦网 (https://www.damai.cn 或 https://m.damai.cn)，确保已登录账号。
-
-### 第三步：建立 SSH 端口转发（工作站端）
+### 第三步：配置文件
 
 ```bash
-ssh -L 9222:localhost:9222 用户名@Mac的IP地址
+cp config.example.json config.json
 ```
 
-这样工作站的 `localhost:9222` 就会转发到 Mac Chrome 的调试端口。
+编辑 `config.json`（勿将含真实场次 ID、开售时间的 `config.json` 提交到公开仓库，本仓库已将其列入 `.gitignore`）。
+
+**完整字段说明**（与 `grab_ticket.py` 读取项一致）：
+
+| 字段 | 说明 |
+|------|------|
+| `cdp_host` | CDP 地址，本机一般为 `127.0.0.1` |
+| `cdp_port` | 调试端口，默认 `9222` |
+| `mobile_mode` | `true` 时启用移动 UA、视口与触摸仿真；PC 详情 `detail.damai.cn/item.htm?id=` 会自动转为 `m.damai.cn/shows/item.html?itemId=` |
+| `mobile_user_agent` | 可选；留空则用内置 iPhone Safari 风格 UA |
+| `mobile_viewport_width` / `mobile_viewport_height` | 仿真分辨率，默认 `390` × `844` |
+| `mobile_device_scale_factor` | 设备像素比，默认 `3` |
+| `target_url` | 演出详情页 URL（从地址栏复制） |
+| `target_time` | 开抢时间 `YYYY-MM-DD HH:MM:SS`；留空或删字段则**立即**进入抢票循环 |
+| `session_index` | 场次索引，从 `0` 起 |
+| `ticket_tier_index` | 票档索引，从 `0` 起 |
+| `ticket_count` | 张数 |
+| `viewer_names` | 观演人姓名；空数组 `[]` 表示由页面默认全选（若支持） |
+| `poll_interval_ms` | 轮询间隔（毫秒） |
+| `retry_count` | 最大重试轮数 |
+| `random_delay_ms` | 刷新间隔随机延迟 `[最小, 最大]` 毫秒，降低风控风险 |
 
 ### 第四步：测试连接
 
 ```bash
-# 测试 CDP 连接是否正常
-python3 grab_ticket.py test
-
-# 列出 Chrome 中所有打开的标签页
-python3 grab_ticket.py list
+python3 grab_ticket.py test   # 测 CDP 与当前标签页
+python3 grab_ticket.py list   # 列出所有调试目标标签
 ```
 
-### 第五步：编辑配置
+### 第五步：（可选）跨机器 SSH 转发
 
-修改 `config.json`：
+在运行脚本的机器上：
 
-```json
-{
-    "cdp_host": "127.0.0.1",
-    "cdp_port": 9222,
-    "target_url": "https://m.damai.cn/shows/detail.html?itemId=演出ID",
-    "target_time": "2026-03-20 10:00:00",
-    "session_index": 0,
-    "ticket_tier_index": 0,
-    "ticket_count": 1,
-    "viewer_names": ["张三"],
-    "poll_interval_ms": 200,
-    "retry_count": 50,
-    "random_delay_ms": [50, 150]
-}
+```bash
+ssh -L 9222:localhost:9222 用户名@运行Chrome的那台机器IP
 ```
 
-**配置项说明**：
+之后 `config.json` 里仍写 `cdp_host: 127.0.0.1` 即可。
 
-| 字段 | 说明 | 示例 |
-|------|------|------|
-| `cdp_host` | CDP 连接地址 | `"127.0.0.1"` |
-| `cdp_port` | CDP 端口 | `9222` |
-| `target_url` | 大麦演出页面 URL | 从浏览器地址栏复制 |
-| `target_time` | 开抢时间，留空则立即开始 | `"2026-03-20 10:00:00"` |
-| `session_index` | 场次索引，从 0 开始 | `0` = 第一场 |
-| `ticket_tier_index` | 票档索引，从 0 开始 | `0` = 第一档（通常最贵） |
-| `ticket_count` | 购买张数 | `1` |
-| `viewer_names` | 观演人姓名，空数组则全选 | `["张三", "李四"]` |
-| `poll_interval_ms` | 轮询间隔（毫秒） | `200` |
-| `retry_count` | 最大重试次数 | `50` |
-| `random_delay_ms` | 随机延迟范围（毫秒），防风控 | `[50, 150]` |
-
-### 第六步：运行抢票
+### 第六步：运行
 
 ```bash
 python3 grab_ticket.py
 ```
 
-## 抢票流程
+**可选：cron 到点只负责拉起进程**（须提前开好带调试端口的 Chrome 并已登录）：
 
-1. **连接阶段** — 连接 Chrome CDP，自动找到大麦网页面标签
-2. **准备阶段** — 导航到目标演出页，预选场次、票档、数量
-3. **等待阶段** — 如果设置了 `target_time`，精确等待到开抢时刻
-4. **抢票阶段** — 高频轮询购买按钮状态，变为可点击时立即点击
-5. **下单阶段** — 自动选择观演人，提交订单
-6. **支付阶段** — 进入支付页面后停止，**需要手动完成支付**
+- 使用本机时区，与 `target_time` 一致；任务内 `cd` 到项目目录，并用 `which python3` 的绝对路径。
+- 日志目录需存在，例如：`mkdir -p logs`
+
+```bash
+# crontab -e 示例：每天 HH:MM 执行一次（请按开售日自行改五段）
+# MM HH DD MM DOW
+# 40 13 26 3 *  cd /path/to/damai-ticket && /usr/bin/python3 grab_ticket.py >> /path/to/damai-ticket/logs/cron.log 2>&1
+```
+
+## 开售时间从哪里来
+
+1. 大麦详情页 / App 上的开抢时间与倒计时  
+2. App「开售提醒」推送  
+3. `target_time` 建议设为官方开抢时间 **提前 60～90 秒**，开抢前再人工看一次页面
+
+## 脚本大致流程
+
+1. 连接 CDP，优先选用已打开的大麦标签  
+2. 按需导航到 `target_url`  
+3. 若检测到仅 App 购票文案 → 退出码 `2`  
+4. 预选场次、票档、数量  
+5. 若配置了 `target_time` → 等待到时刻并刷新后再选  
+6. 轮询「立即购买」等按钮，可点后点击并尝试提交订单  
+7. 进入支付页后停止，**须人工支付**
 
 ## 注意事项
 
-- 脚本不会自动支付，进入支付页后需要手动操作
-- 建议先用不热门的演出测试全流程
-- 大麦网页面结构可能更新，如遇到元素定位失败需调整 JS 选择器
-- `poll_interval_ms` 不宜设太小（< 100ms），可能触发风控
-- 该脚本仅供学习研究使用
+- 不自动支付；合规与风控风险自负，仅供学习研究  
+- 页面改版可能导致选择器失效，需改 `grab_ticket.py` 内嵌 JS  
+- `poll_interval_ms` 不宜过小（例如长期低于 `100`）  
+- `mobile_mode` 不能绕过「仅限 App」策略  
 
-## 文件结构
+## 仓库文件
 
 ```
-├── grab_ticket.py   # 主脚本
-├── config.json      # 配置文件
-├── .gitignore
+├── grab_ticket.py      # 主程序
+├── config.example.json # 配置模板（复制为 config.json）
+├── .gitignore          # 忽略本地 config.json、logs 等
 └── README.md
 ```
 

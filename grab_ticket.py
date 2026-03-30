@@ -4,10 +4,12 @@
 
 使用方式:
 1. Mac 启动 Chrome: open -a "Google Chrome" --args --remote-debugging-port=9222
-2. 工作站 SSH 转发: ssh -L 9222:localhost:9222 caihaolun@192.168.0.10
-3. 在 Chrome 中登录大麦网
-4. 编辑 config.json
-5. python3 grab_ticket.py
+2. 在 Chrome 中登录大麦网
+3. 编辑 config.json（可选 `mobile_mode` 走 H5 移动仿真）
+4. python3 grab_ticket.py
+
+（可选）跨机器运行时再加 SSH 转发:
+ssh -L 9222:localhost:9222 <user>@<mac_ip>
 """
 
 import asyncio
@@ -17,6 +19,14 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+# 移动模式默认 UA（iPhone Safari）；部分场次仅开放 H5，仍可能被服务端要求跳转 App
+DEFAULT_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+    "Mobile/15E148 Safari/604.1"
+)
 
 try:
     import websockets
@@ -120,10 +130,13 @@ def get_ws_url(host, port, target_url=None):
             print(f"  找到大麦页面: {page_url[:80]}")
             return page["webSocketDebuggerUrl"]
 
-    # 如果指定了 target_url，尝试匹配
+    # 如果指定了 target_url，尝试匹配已打开的对应标签
     if target_url:
         for page in pages:
-            if page.get("type") != "page" and target_url in page.get("url", ""):
+            if page.get("type") != "page":
+                continue
+            if target_url in page.get("url", ""):
+                print(f"  匹配目标 URL 标签: {page.get('url', '')[:80]}")
                 return page["webSocketDebuggerUrl"]
 
     # 回退到第一个页面
@@ -273,6 +286,77 @@ JS_GET_PAGE_INFO = """
 })()
 """
 
+JS_DETECT_APP_ONLY_CHANNEL = """
+(() => {
+    const text = document.body ? (document.body.innerText || '') : '';
+    const needles = [
+        '该渠道不支持购票', '请到大麦App购买', '请到大麦App', '请到APP购票',
+        '请前往APP', '请使用大麦APP', '请前往APP购买'
+    ];
+    for (const n of needles) {
+        if (text.includes(n)) return { blocked: true, matched: n };
+    }
+    return { blocked: false };
+})()
+"""
+
+
+def normalize_target_url_for_mobile(target_url):
+    """将 PC 详情 item.htm?id= 转为 H5 m.damai.cn/shows/item.html?itemId=。"""
+    if not target_url or "YOUR_ITEM_ID" in target_url or "ITEM_ID" in target_url:
+        return target_url
+    try:
+        u = urlparse(target_url.strip())
+        host = (u.netloc or "").lower()
+        if "detail.damai.cn" in host and "item.htm" in u.path:
+            q = parse_qs(u.query)
+            ids = q.get("id") or q.get("itemId")
+            if ids and ids[0].isdigit():
+                return f"https://m.damai.cn/shows/item.html?itemId={ids[0]}"
+    except Exception:
+        pass
+    return target_url
+
+
+async def apply_mobile_emulation(cdp, config):
+    """CDP 模拟手机视口与 UA，便于打开 m.damai.cn H5。"""
+    ua = (config.get("mobile_user_agent") or "").strip() or DEFAULT_MOBILE_UA
+    vw = int(config.get("mobile_viewport_width", 390))
+    vh = int(config.get("mobile_viewport_height", 844))
+    dpr = float(config.get("mobile_device_scale_factor", 3))
+
+    await cdp.send("Network.enable")
+    await cdp.send(
+        "Network.setUserAgentOverride",
+        {"userAgent": ua, "acceptLanguage": "zh-CN,zh;q=0.9", "platform": "iPhone"},
+    )
+    await cdp.send(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": vw,
+            "height": vh,
+            "deviceScaleFactor": dpr,
+            "mobile": True,
+        },
+    )
+    await cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5})
+
+
+async def check_app_only_and_exit(cdp):
+    """若页面明确仅 App 渠道，退出并提示。"""
+    try:
+        r = await cdp.evaluate(JS_DETECT_APP_ONLY_CHANNEL)
+    except Exception:
+        return False
+    if not r or not r.get("blocked"):
+        return False
+    log(
+        "检测到「仅大麦 App 购票」类提示（匹配: %s）。浏览器/CDP 无法替代原生 App，请改用大麦 App 或选择仍开放网页购票的场次。"
+        % r.get("matched", "?"),
+        "ERROR",
+    )
+    return True
+
 
 def log(msg, level="INFO"):
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -309,7 +393,12 @@ async def refresh_page(cdp):
 async def run(config):
     host = config["cdp_host"]
     port = config["cdp_port"]
-    target_url = config["target_url"]
+    mobile_mode = bool(config.get("mobile_mode"))
+    nav_url = config["target_url"]
+    if mobile_mode:
+        nav_url = normalize_target_url_for_mobile(nav_url)
+        if nav_url != config["target_url"]:
+            log(f"mobile_mode: 已切换为 H5 地址 {nav_url[:100]}")
     target_time = config.get("target_time")
     session_idx = config.get("session_index", 0)
     tier_idx = config.get("ticket_tier_index", 0)
@@ -322,7 +411,7 @@ async def run(config):
     # ── 1. 连接 CDP ──
     log("正在连接 Chrome CDP...")
     try:
-        ws_url = get_ws_url(host, port, target_url)
+        ws_url = get_ws_url(host, port, nav_url)
     except Exception as e:
         sys.exit(f"无法连接 Chrome CDP ({host}:{port}): {e}\n"
                  f"请确认:\n"
@@ -338,18 +427,31 @@ async def run(config):
     await cdp.send("Page.enable")
     await cdp.send("Runtime.enable")
 
+    if mobile_mode:
+        log("mobile_mode: 启用移动 UA / 视口 / 触摸仿真")
+        await apply_mobile_emulation(cdp, config)
+
     # 获取当前页面信息
     info = await cdp.evaluate(JS_GET_PAGE_INFO)
     log(f"当前页面: {info.get('title', 'N/A')} - {info.get('url', 'N/A')[:80]}")
 
     # ── 2. 导航到目标页面 ──
     current_url = info.get("url", "")
-    if target_url and "YOUR_ITEM_ID" not in target_url and target_url not in current_url:
-        log(f"导航到目标页面: {target_url[:80]}")
-        await cdp.send("Page.navigate", {"url": target_url})
+    placeholder = "YOUR_ITEM_ID" in nav_url or "ITEM_ID" in nav_url
+    if nav_url and not placeholder and nav_url not in current_url:
+        log(f"导航到目标页面: {nav_url[:80]}")
+        await cdp.send("Page.navigate", {"url": nav_url})
         await asyncio.sleep(3)
         info = await cdp.evaluate(JS_GET_PAGE_INFO)
         log(f"已到达: {info.get('title', 'N/A')}")
+    elif placeholder:
+        log("target_url 含占位符，跳过自动导航（请在已打开标签进入目标场次）", "WARN")
+    else:
+        await asyncio.sleep(0.3)
+
+    if await check_app_only_and_exit(cdp):
+        await cdp.close()
+        sys.exit(2)
 
     # ── 3. 预选场次和票档 ──
     log("尝试预选场次和票档...")
@@ -371,6 +473,9 @@ async def run(config):
         # 开抢前刷新页面
         log("刷新页面...")
         await refresh_page(cdp)
+        if await check_app_only_and_exit(cdp):
+            await cdp.close()
+            sys.exit(2)
         # 重新选择场次票档
         await cdp.evaluate(f"({JS_SELECT_SESSION})({session_idx})")
         await asyncio.sleep(0.3)
@@ -511,6 +616,9 @@ def main():
     print("=" * 60)
     print("  大麦网自动抢票脚本")
     print("=" * 60)
+    if config.get("mobile_mode"):
+        nu = normalize_target_url_for_mobile(config["target_url"])
+        print(f"  mobile_mode: 开（H5: {nu[:65]}…）" if len(nu) > 65 else f"  mobile_mode: 开（H5: {nu}）")
     print(f"  目标: {config['target_url'][:60]}")
     if config.get("target_time"):
         print(f"  开抢时间: {config['target_time']}")
